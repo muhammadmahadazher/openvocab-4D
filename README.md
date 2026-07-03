@@ -1,167 +1,183 @@
-# Open-Vocabulary 4D Scene Understanding on an 8GB Laptop GPU
+<div align="center">
 
-**Text prompt + casual video → persistent, labeled 3D objects.**
-Point the pipeline at a video walkthrough and a list of concepts (`"chair, table, monitor"`),
-and it produces a metric-consistent 3D reconstruction where every instance of every concept is
-segmented, tracked across the full video, and placed in world space — fully local on an
-RTX 4060 Laptop GPU (8 GB VRAM).
+# OpenVocab-4D
 
-![Labeled 3D reconstruction of a loft from a phone-style walkthrough](docs/scene_labeled.png)
-*488-frame walkthrough of a loft (DigAkust dataset) → 49 persistent 3D objects. Red = chair,
-blue = table, green = monitor, yellow = brick wall, purple = plant.*
+**Video + text → labeled 3D scene. Fully local, on an 8 GB GPU.**
 
-## Why this is interesting
+[![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.7+_cu126-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![VGGT](https://img.shields.io/badge/VGGT-CVPR_2025_Best_Paper-6B4FBB)](https://github.com/facebookresearch/vggt)
+[![SAM 3](https://img.shields.io/badge/SAM_3-Meta_2025-0866FF)](https://github.com/facebookresearch/sam3)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Two of the last two CVPR Best Papers point the same direction: **one feed-forward transformer
-replacing the classical 3D pipeline** ([VGGT](https://github.com/facebookresearch/vggt), CVPR 2025)
-and its extension to dynamic scenes (D4RT, CVPR 2026). Meanwhile
-[SAM 3](https://github.com/facebookresearch/sam3) (Meta, 2025) made segmentation *promptable by
-concept*: every instance of an open-vocabulary noun phrase, in images or video.
+<img src="docs/scene_labeled.png" width="90%" alt="Labeled 3D reconstruction of a loft"/>
 
-This project fuses the two into a working system, and adds the engineering nobody publishes:
-making it run in a consumer VRAM budget.
+*A 488-frame phone-style walkthrough → 49 persistent 3D objects.*
+*<span style="color:#e6483c">chair</span> · <span style="color:#3ca0e6">table</span> · <span style="color:#46c85a">monitor</span> · <span style="color:#f0b428">brick wall</span> · <span style="color:#aa5adc">plant</span>*
 
+</div>
+
+---
+
+## What it does
+
+Type `"chair, table, monitor"`, point it at a video walkthrough, and get back:
+
+- 🗺️ **Metric 3D reconstruction** — cameras, depth, dense point cloud (no COLMAP needed)
+- 🏷️ **Every instance of every concept** segmented, tracked, and placed in world space
+- 🖱️ **Interactive 3D scene** — orbit it, toggle object groups on/off (Rerun viewer)
+- 📊 **Benchmark report** — pose accuracy vs. a COLMAP reference, if you have one
+
+## How it works
+
+```mermaid
+flowchart TB
+    A["🎥 video walkthrough<br/><i>every Nth frame</i>"] --> C
+    B["💬 text concepts<br/><i>chair, table, monitor…</i>"] --> D
+    subgraph GEO ["geometry branch"]
+        C["<b>VGGT-1B</b><br/>cameras + depth<br/>40-frame chunks"] --> E["<b>Sim(3) registration</b><br/>Umeyama on overlap points"]
+    end
+    subgraph SEM ["semantics branch"]
+        D["<b>SAM 3</b> (846M)<br/>instance masks per frame"] --> F["<b>3D tracking-by-detection</b><br/>world-centroid association"]
+    end
+    E -. world coordinates .-> F
+    E --> H["<b>fusion</b><br/>masks × depth → labeled points"]
+    F --> H
+    H --> I["🧊 objects.rrd · objects.ply<br/>labels.npz"]
+    H --> J["📏 eval vs COLMAP<br/>ATE 5.6% of extent"]
 ```
-video frames ─┬─► VGGT-1B, chunked (40 frames, 8 overlap) ─► cameras + depth + confidence
-              │       └─ chunks registered into one world frame:
-              │          Sim(3) Umeyama on dense overlap-frame depth correspondences
-              └─► SAM 3 (846M) per-frame concept detection
-                      └─ 3D tracking-by-detection: greedy association of detections
-                         by WORLD-SPACE centroid (viewpoint-invariant), flicker filtering
-fusion: masks × depth × cameras ─► per-object labeled point clouds
-outputs: objects.rrd (interactive Rerun scene) · objects.ply · labels.npz · eval vs COLMAP
+
+**One sentence per stage:**
+
+| Stage | What happens |
+|---|---|
+| **VGGT** (CVPR 2025 Best Paper) | one transformer forward pass → cameras + depth, no feature matching or bundle adjustment |
+| **Sim(3) registration** | overlapping chunk frames give exact 3D↔3D correspondences → closed-form scale/rotation/translation per seam |
+| **SAM 3** | *"promptable concept segmentation"* — every instance of an open-vocabulary phrase, per frame |
+| **3D tracking** | detections matched by **world-space centroid** — viewpoint-invariant identity for free |
+| **Fusion** | every tracked mask back-projected through depth + cameras → per-object point clouds |
+
+Full technical deep-dive: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+
+## Install
+
+> **Requirements:** NVIDIA GPU 8 GB+ (Windows/Linux) · Python 3.12+ · git
+> macOS installs run CPU/MPS — experimental and slow.
+
+<details open>
+<summary><b>🪟 Windows</b></summary>
+
+```powershell
+git clone https://github.com/muhammadmahadazher/openvocab-4D
+cd openvocab-4D
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+</details>
+
+<details>
+<summary><b>🐧 Linux</b></summary>
+
+```bash
+git clone https://github.com/muhammadmahadazher/openvocab-4D
+cd openvocab-4D
+bash install.sh
+```
+</details>
+
+<details>
+<summary><b>🍎 macOS (experimental, CPU/MPS)</b></summary>
+
+```bash
+git clone https://github.com/muhammadmahadazher/openvocab-4D
+cd openvocab-4D
+bash install.sh
+```
+</details>
+
+**One manual step (all platforms):** SAM 3 weights are license-gated by Meta —
+accept once at [huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3), then:
+
+```bash
+hf auth login
 ```
 
-## Results (loft walkthrough, 244 frames used, RTX 4060 Laptop 8GB)
+## Run
 
-### Camera pose accuracy vs COLMAP reference (215 matched frames)
-
-| Metric | Value |
+| | Command |
 |---|---|
-| ATE RMSE (Sim(3)-aligned) | **5.6 % of trajectory extent** |
-| ATE median | 4.4 % of extent |
-| Rotation error median / p90 | **7.9° / 10.8°** |
-| VGGT reconstruction time | **~3.5 min** (8 chunks × ~26 s) |
-| COLMAP (reference, offline) | hours, with global bundle adjustment |
+| 🖥️ **GUI** | `ov4d-gui` → opens in your browser |
+| ⌨️ **CLI** | `ov4d --images <frames> --out out/scene --prompts "chair,table" --render` |
+| 🧊 **View a result** | `rerun out/scene/objects.rrd` |
 
-![VGGT trajectory vs COLMAP](docs/trajectory_vs_colmap.png)
+### Test it in 5 minutes
 
-No bundle adjustment, no loop closure — a feed-forward network plus a closed-form alignment,
-within striking distance of an offline SfM pipeline at a fraction of the runtime.
+1. `ov4d-gui` → browser opens
+2. Drop in any **.mp4** (a slow 30–60 s walkthrough of a room works best) — or paste a folder path of frames
+3. Concepts: `chair, table, monitor` → click **Reconstruct**
+4. Watch the live log (VGGT chunks → tracking → fusion, ~5–10 min for a short video)
+5. Click **Open 3D viewer** → orbit the scene, toggle `world/objects/<concept>` in the tree
 
-### Open-vocabulary 3D objects
+Step-by-step guide with screenshots-level detail + troubleshooting: **[docs/USAGE.md](docs/USAGE.md)**
 
-| Concept | Persistent 3D objects |
-|---|---|
-| chair | 22 |
-| table | 10 |
-| monitor | 11 |
-| brick wall | 3 |
-| plant | 3 |
+## Results
 
-283 k labeled 3D points; median object footprint 10 % of the scene diagonal (objects are compact,
-not smeared). Cross-frame identity comes from **world-space centroid association** — matching
-objects in 3D instead of 2D makes the tracker viewpoint-invariant for free.
+**Pose accuracy vs COLMAP** (loft walkthrough, 215 matched frames, RTX 4060 Laptop 8 GB):
 
-![SAM 3 open-vocabulary instance segmentation](docs/sam3_overlay.png)
-*Per-frame SAM 3 detections: every chair / monitor / table instance with its own mask and score.*
+| Metric | OpenVocab-4D | COLMAP (reference) |
+|---|---|---|
+| ATE RMSE | **5.6 % of extent** | — |
+| Rotation error (median / p90) | **7.9° / 10.8°** | — |
+| Runtime (geometry) | **~3.5 min** | hours |
+| Bundle adjustment | none (feed-forward) | global |
 
-### VRAM engineering (the actual contribution)
+<img src="docs/trajectory_vs_colmap.png" width="85%" alt="VGGT trajectory vs COLMAP"/>
+
+**Open-vocabulary objects found:** 22 chairs · 10 tables · 11 monitors · 3 brick walls · 3 plants (283 k labeled points)
+
+<details>
+<summary><b>SAM 3 per-frame segmentation example</b></summary>
+<img src="docs/sam3_overlay.png" width="85%" alt="SAM 3 instance segmentation"/>
+</details>
+
+**VRAM engineering** (why it fits in 8 GB):
 
 | Component | Config | Peak VRAM |
 |---|---|---|
-| VGGT-1B, 25 frames | bf16 weights + autocast | 4.6 GiB |
-| VGGT-1B, 49 frames | bf16 weights + autocast | 6.8 GiB |
-| VGGT-1B, 40-frame chunks (244-frame video) | bf16 | 6.35 GiB steady |
+| VGGT-1B, 40-frame chunks | bf16 + autocast | 6.35 GiB |
 | SAM 3 image (846M) | bf16 autocast | 3.8–4.2 GiB |
-| 3D tracking-by-detection, 5 concepts × 244 frames | | **4.1 GiB, 212 s** |
-| SAM 3 / 3.1 *video* tracker | any config tried | ❌ OOM |
+| 3D tracking, 5 concepts × 244 frames | | 4.1 GiB · 212 s |
+| SAM 3/3.1 *video* tracker | any config | ❌ OOM — [why](docs/ARCHITECTURE.md#stage-2--open-vocabulary-instances-with-persistent-identity) |
 
-Finding worth knowing: the SAM 3/3.1 video trackers cannot fit in 8 GB — the multiplex memory
-encoder allocates fixed 1152×1152 multi-channel mask buffers regardless of input resolution
-(tried: bf16 backbone with fp32-stable decoder, object caps, 720 px input, CPU offload).
-The 3D tracking-by-detection replacement runs in half the memory and is ~100 lines of transparent
-numpy.
+## Limitations (honest)
 
-## Install (Windows / Linux / macOS)
+- 🔁 Objects revisited later may get a new ID (conservative association) — DINOv3 re-ID on the roadmap
+- 📐 Chunk-chaining drift; a pose graph would tighten the 5.6 % ATE
+- 🧍 Static-scene assumption — moving objects belong to D4RT-style dynamic reconstruction
+- 🍎 macOS = CPU-mode, minutes become hours
 
-```bash
-git clone https://github.com/<user>/openvocab-4d && cd openvocab-4d
-# Windows:            powershell -ExecutionPolicy Bypass -File install.ps1
-# Linux / macOS:      bash install.sh
+## Project layout
+
 ```
-
-The script creates a venv, installs the right PyTorch build (CUDA 12.6 on Windows/Linux;
-CPU/MPS on macOS — experimental and slow, an NVIDIA GPU with 8 GB+ is the intended target),
-clones the pinned VGGT and SAM 3 repos, and installs everything as the `openvocab4d` package.
-
-**One manual step:** SAM 3 weights are license-gated by Meta. Accept once at
-[huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3), then `hf auth login`.
-
-## Use it
-
-**GUI** — upload a video, type concepts, click Reconstruct:
-
-```bash
-ov4d-gui            # or: python app.py
+reconstruct.py        CLI entry (ov4d)
+app.py                Gradio GUI (ov4d-gui)
+trackA/
+  milestone1..4_*.py  pipeline stages (each runs standalone)
+  eval_colmap.py      pose-accuracy benchmark (parses COLMAP .bin natively)
+  render_scene.py     README-style renders
+docs/
+  ARCHITECTURE.md     how every stage works, with the math
+  USAGE.md            step-by-step run/test guide + troubleshooting
+install.ps1 / .sh     one-command setup (Win / Linux / macOS)
 ```
-
-Live pipeline log, labeled-scene render, object table, and a button that opens the full
-interactive 3D scene in the Rerun viewer.
-
-**CLI** — same pipeline, scriptable:
-
-```bash
-ov4d --images path/to/frames --out out/myscene \
-     --prompts "chair,table,monitor" --step 2 --render \
-     --eval-colmap path/to/colmap/sparse/0   # optional, if you have a reference
-
-rerun out/myscene/objects.rrd   # explore: toggle world/objects/<concept> in the tree
-```
-
-Full technical explanation of every stage: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-Single-scene tools (each is also a standalone milestone):
-`trackA/milestone1_vggt_stills.py` (photos → 3D + VRAM benchmark) ·
-`trackA/milestone2_sam3_concepts.py` (concept masks on any images) ·
-`trackA/milestone3_fuse.py` (single-chunk fusion) ·
-`trackA/milestone4_video.py` (staged full-video pipeline) ·
-`trackA/eval_colmap.py` (pose accuracy).
-
-## Honest limitations
-
-- **Track persistence is short** (longest track ≈ 8 detections): association is deliberately
-  conservative (radius 5 % of scene diagonal), so an object revisited later in the walkthrough
-  usually gets a new ID. Fix on the roadmap: appearance-embedding re-ID (DINOv3 features per mask).
-- **Chunk drift**: Sim(3) chaining accumulates error (per-chunk overlap RMS 0.03–0.23 scene units);
-  a pose-graph over chunk constraints would tighten the 5.6 % ATE meaningfully.
-- **Static-scene assumption**: VGGT treats the scene as rigid; dynamic objects belong to the
-  D4RT line of work (its query-based 4D formulation is the natural upgrade here).
-- The loft frames are perspective crops from a 360° rig — mild stitching artifacts propagate
-  into depth around crop seams.
-
-## Windows survival notes (hard-won)
-
-<details>
-<summary>expand</summary>
-
-- `rerun` must be imported **and** its recording stream created **before** `import torch`,
-  otherwise the process dies with STATUS_HEAP_CORRUPTION (torch 2.12+cu126 / rerun 0.23.1).
-- Never let native code write to a Google Drive virtual path — write to local temp, then copy.
-- VGGT's DPT head injects an fp32 positional embedding: half-precision weights require autocast.
-- SAM 3 has undeclared deps on Windows: `triton-windows`, `pycocotools`, `psutil`; it must run
-  under bf16 autocast (its perflib hard-casts fused ops); `async_loading_frames` breaks
-  thread-local autocast; the multiplex predictor's `start_session` forwards a kwarg its
-  `init_state` rejects (shimmed at runtime).
-- Laptop dGPUs can be powered off by OEM battery management mid-run — "No CUDA GPUs are
-  available" with a clean event log means *check the charger*, not the driver.
-
-</details>
 
 ## References
 
-- Wang et al., *VGGT: Visual Geometry Grounded Transformer*, CVPR 2025 (Best Paper) — [repo](https://github.com/facebookresearch/vggt)
-- Carion, Gustafson, Hu et al., *SAM 3: Segment Anything with Concepts*, 2025 — [repo](https://github.com/facebookresearch/sam3)
-- Zhang et al., *Efficiently Reconstructing Dynamic Scenes One D4RT at a Time*, CVPR 2026 (Best Paper)
-- Dataset: DigAkust loft scan (Aspekteins GmbH, Saarbrücken) via Kaggle, with COLMAP reference
-- Umeyama, *Least-squares estimation of transformation parameters between two point patterns*, TPAMI 1991
+- Wang et al., **VGGT: Visual Geometry Grounded Transformer** — CVPR 2025 *Best Paper* · [repo](https://github.com/facebookresearch/vggt)
+- Carion, Gustafson, Hu et al., **SAM 3: Segment Anything with Concepts** — Meta, 2025 · [repo](https://github.com/facebookresearch/sam3)
+- Zhang et al., **D4RT** — CVPR 2026 *Best Paper* (the dynamic-scene upgrade path)
+- Dataset: DigAkust loft scan (Aspekteins GmbH) via Kaggle, with COLMAP reference
+- Umeyama, TPAMI 1991 — closed-form Sim(3) estimation
+
+<div align="center">
+<sub>Built end-to-end on a single RTX 4060 Laptop (8 GB) · MIT License</sub>
+</div>
