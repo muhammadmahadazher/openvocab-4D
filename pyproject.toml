@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openvocab4d"
+version = "0.1.0"
+description = "Open-vocabulary 4D scene understanding on consumer GPUs: video + text concepts -> labeled 3D scene (VGGT + SAM 3)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    # torch/torchvision are installed separately per-platform (CUDA build) by
+    # the install scripts -- see install.ps1 / install.sh
+    "numpy>=1.26,<2",
+    "Pillow",
+    "huggingface_hub",
+    "einops",
+    "safetensors",
+    "rerun-sdk>=0.23",
+    "matplotlib",
+    "gradio>=5",
+    "opencv-python",
+    # SAM 3 runtime deps its own package metadata omits
+    "timm>=1.0.17",
+    "ftfy",
+    "regex",
+    "iopath",
+    "pycocotools",
+    "psutil",
+    'triton-windows; platform_system == "Windows"',
+]
+
+[project.scripts]
+ov4d = "reconstruct:main"
+ov4d-gui = "app:main"
+
+[tool.setuptools]
+py-modules = ["reconstruct", "app"]
+packages = ["trackA"]

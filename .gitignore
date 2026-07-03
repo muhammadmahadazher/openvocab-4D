@@ -1,0 +1,18 @@
+# third-party model repos (cloned + pinned by install scripts)
+vggt/
+sam3/
+
+# outputs and caches
+out/
+.venv/
+__pycache__/
+*.pyc
+.gradio/
+flagged/
+
+# large local data
+*.rrd
+*.ply
+!docs/*.png
+
+*.egg-info/
