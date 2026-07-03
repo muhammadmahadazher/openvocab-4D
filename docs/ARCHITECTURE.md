@@ -129,8 +129,12 @@ COLMAP, that is the trade this system makes: ~3.5 minutes of GPU time for ~95 % 
 
 ## Known limitations (and their fixes)
 
-1. **Short track lifetimes** — conservative association re-IDs an object when the camera returns
-   to a room. Fix: mask-level appearance embeddings (e.g. DINOv3) as a second association cue.
+1. **Identity vs. counting trade-off** — the default tracker adds DINOv2 appearance re-ID
+   (masked-pooled patch embeddings, two-tier association, offline fragment consolidation gated
+   on temporal co-occurrence). This extends track lifetimes from ~8 detections to 214/244 frames
+   but over-counts when SAM 3 double-detects (whole object + part): simultaneous tracks are
+   never merged by design. `--no-reid` gives compact spatial-only counts instead. Next step:
+   mask-IoU-aware merging to fuse same-frame double-detections.
 2. **Seam drift** — Sim(3) chaining accumulates; a pose graph over chunk constraints (or
    VGGT-Omega's longer context) would tighten ATE.
 3. **Rigid-world assumption** — moving objects violate VGGT's geometry; D4RT-style dynamic

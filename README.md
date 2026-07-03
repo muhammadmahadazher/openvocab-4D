@@ -132,7 +132,12 @@ Step-by-step guide with screenshots-level detail + troubleshooting: **[docs/USAG
 
 <img src="docs/trajectory_vs_colmap.png" width="85%" alt="VGGT trajectory vs COLMAP"/>
 
-**Open-vocabulary objects found:** 22 chairs · 10 tables · 11 monitors · 3 brick walls · 3 plants (283 k labeled points)
+**Open-vocabulary tracking — two modes, one flag:**
+
+| Mode | Objects found | Longest track | Character |
+|---|---|---|---|
+| `--no-reid` (spatial only) | 49 | ~8 detections | compact counts, identity splits over time |
+| default (DINOv2 re-ID + consolidation) | 119 | **214 / 244 frames** | identity survives room revisits, over-counts from double-detections |
 
 <details>
 <summary><b>SAM 3 per-frame segmentation example</b></summary>
@@ -145,12 +150,12 @@ Step-by-step guide with screenshots-level detail + troubleshooting: **[docs/USAG
 |---|---|---|
 | VGGT-1B, 40-frame chunks | bf16 + autocast | 6.35 GiB |
 | SAM 3 image (846M) | bf16 autocast | 3.8–4.2 GiB |
-| 3D tracking, 5 concepts × 244 frames | | 4.1 GiB · 212 s |
+| 3D tracking, 5 concepts × 244 frames | spatial / +re-ID | 4.1 GiB · 212 s / 4.2 GiB · 445 s |
 | SAM 3/3.1 *video* tracker | any config | ❌ OOM — [why](docs/ARCHITECTURE.md#stage-2--open-vocabulary-instances-with-persistent-identity) |
 
 ## Limitations (honest)
 
-- 🔁 Objects revisited later may get a new ID (conservative association) — DINOv3 re-ID on the roadmap
+- 🔁 Re-ID mode over-counts: SAM 3 sometimes double-detects (whole object + part), and the merge pass deliberately refuses to fuse tracks seen simultaneously — mask-IoU-aware merging is the next step (DINOv3 embeddings are a drop-in once its gated weights are granted)
 - 📐 Chunk-chaining drift; a pose graph would tighten the 5.6 % ATE
 - 🧍 Static-scene assumption — moving objects belong to D4RT-style dynamic reconstruction
 - 🍎 macOS = CPU-mode, minutes become hours

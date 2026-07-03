@@ -86,7 +86,8 @@ handy for trying new prompts without re-running VGGT.
 | `No CUDA GPUs are available` | laptop on battery? plug in AC. Then `nvidia-smi` to confirm |
 | `GatedRepoError: 401` | accept the SAM 3 license on HF, then `hf auth login` |
 | Very slow on macOS | expected — no CUDA; use a smaller video and `--step 5` |
-| Objects fragment into several IDs | raise association radius: it's conservative by design; re-ID is on the roadmap |
+| Objects fragment into several IDs | default re-ID mode keeps identity across revisits; lower `--reid-sim` (e.g. 0.5) to merge more aggressively |
+| Too many objects reported | run with `--no-reid` for compact spatial-only counts, or raise `--reid-sim` |
 | Reconstruction looks warped | input violates the static-scene assumption (people moving), or frames have heavy motion blur / rolling shutter |
 | GUI stuck at "Extracting frames" | very long video — it caps at 2000 frames; give it a minute |
 

@@ -57,6 +57,12 @@ def parse_args():
     p.add_argument("--track-res", type=int, default=1008,
                    help="max side length for frames fed to the video tracker (it works at "
                         "1008 internally; higher only costs VRAM)")
+    p.add_argument("--no-reid", action="store_true",
+                   help="disable appearance re-identification (DINOv2 embeddings)")
+    p.add_argument("--reid-sim", type=float, default=0.6,
+                   help="min cosine similarity to re-identify a dormant/distant track")
+    p.add_argument("--reid-radius-frac", type=float, default=0.15,
+                   help="re-id search radius as a fraction of the scene diagonal")
     return p.parse_args()
 
 
@@ -239,8 +245,42 @@ def resize_mask(mask, dw, dh):
     return arr[top:top + dh, :]
 
 
+def embed_detections(dino, pil_img, det_masks, dw, dh):
+    """Masked appearance embeddings (DINOv2-S patch tokens pooled inside the mask).
+
+    Crops each detection's bounding box from the full-res image, extracts the
+    16x16 patch-token grid, and averages tokens weighted by the (resized)
+    instance mask -> one L2-normalized 384-d descriptor per detection.
+    """
+    import torchvision.transforms.functional as TF
+
+    W, H = pil_img.size
+    sx, sy = W / dw, H / dh
+    crops, weights = [], []
+    for m in det_masks:
+        ys, xs = np.nonzero(m)
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        crop = pil_img.crop((int(x0 * sx), int(y0 * sy), int(x1 * sx), int(y1 * sy)))
+        crops.append(TF.to_tensor(crop.resize((224, 224), Image.BILINEAR)))
+        mcrop = Image.fromarray(m[y0:y1, x0:x1].astype(np.uint8) * 255).resize(
+            (16, 16), Image.BILINEAR)
+        weights.append(np.asarray(mcrop, np.float32).reshape(-1) / 255.0)
+    x = torch.stack(crops).cuda()
+    x = TF.normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        toks = dino.forward_features(x)["x_norm_patchtokens"]  # (N, 256, 384)
+    toks = toks.float().cpu().numpy()
+    embs = []
+    for i, w in enumerate(weights):
+        w = w + 1e-6
+        e = (toks[i] * w[:, None]).sum(axis=0) / w.sum()
+        embs.append(e / (np.linalg.norm(e) + 1e-9))
+    return embs
+
+
 def stage_track(frames):
-    """3D tracking-by-detection.
+    """3D tracking-by-detection with appearance re-identification.
 
     The SAM 3 / 3.1 video trackers do not fit in 8GB VRAM (the multiplex
     memory encoder allocates fixed 1152x1152 multi-channel buffers regardless
@@ -248,6 +288,12 @@ def stage_track(frames):
     ~4 GiB) + our own cross-frame association using world-space 3D centroids
     from the stage-vggt geometry. World-space matching is viewpoint-invariant,
     which is exactly what per-frame 2D matching (milestone 3) lacked.
+
+    Association is two-tier:
+      tier 1 - spatially tight (5% of scene diag), recent (<=40 frames)
+      tier 2 - re-id: dormant or farther tracks within --reid-radius-frac,
+               accepted only when DINOv2 cosine similarity >= --reid-sim
+               (DINOv3 is a drop-in swap once its gated weights are granted)
     """
     cams = np.load(OUT_DIR / "cameras.npz")
     dep = np.load(OUT_DIR / "depth.npz")
@@ -265,7 +311,11 @@ def stage_track(frames):
     t0 = time.perf_counter()
     model = build_sam3_image_model()
     processor = Sam3Processor(model)
-    print(f"[track] SAM 3 image model loaded in {time.perf_counter() - t0:.1f}s")
+    dino = None
+    if not ARGS.no_reid:
+        dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14").cuda().eval()
+    print(f"[track] SAM 3 image model loaded in {time.perf_counter() - t0:.1f}s"
+          f"{' (+ DINOv2-S re-id)' if dino is not None else ''}")
 
     label_vols = {pi: np.zeros((S, dh, dw), np.uint16) for pi in range(len(prompts))}
     tracks = [{} for _ in prompts]   # per prompt: id -> {"centroid", "last_frame", "frames"}
@@ -282,9 +332,11 @@ def stage_track(frames):
             if scene_diag is None:
                 pts0 = world[keep]
                 scene_diag = float(np.linalg.norm(pts0.max(0) - pts0.min(0))) if len(pts0) else 1.0
-            eps = 0.05 * scene_diag
+            eps_near = 0.05 * scene_diag
+            eps_far = ARGS.reid_radius_frac * scene_diag
 
-            state = processor.set_image(Image.open(path).convert("RGB"))
+            pil_img = Image.open(path).convert("RGB")
+            state = processor.set_image(pil_img)
             for pi, prompt in enumerate(prompts):
                 output = processor.set_text_prompt(prompt=prompt, state=state)
                 masks = output["masks"]
@@ -301,24 +353,41 @@ def stage_track(frames):
                     sel = m & keep
                     if sel.sum() < ARGS.min_points:
                         continue
-                    dets.append((float(scores[k]), m, world[sel].mean(axis=0)))
-                # greedy association, highest score first, in world space
-                for score, m, cen in sorted(dets, key=lambda x: -x[0]):
-                    best, best_d = None, eps
+                    dets.append([float(scores[k]), m, world[sel].mean(axis=0), None])
+                if dino is not None and dets:
+                    embs = embed_detections(dino, pil_img, [d[1] for d in dets], dw, dh)
+                    for d, e in zip(dets, embs):
+                        d[3] = e
+                # greedy association, highest detection score first
+                for score, m, cen, emb in sorted(dets, key=lambda x: -x[0]):
+                    best, best_score = None, -1.0
                     for tid, tr in tracks[pi].items():
-                        if f - tr["last_frame"] > 40:
-                            continue
+                        if tr["last_frame"] == f:
+                            continue  # one detection per track per frame
                         dist = float(np.linalg.norm(tr["centroid"] - cen))
-                        if dist < best_d:
-                            best, best_d = tid, dist
+                        gap = f - tr["last_frame"]
+                        sim = float(emb @ tr["emb"]) if emb is not None and tr["emb"] is not None else None
+                        if dist < eps_near and gap <= 40 and (sim is None or sim > 0.2):
+                            s = 1.5 - dist / eps_near + (sim or 0.0)   # tier 1: continue track
+                        elif dist < eps_far and sim is not None and sim >= ARGS.reid_sim:
+                            s = sim - 0.3 * dist / eps_far            # tier 2: re-identify
+                        else:
+                            continue
+                        if s > best_score:
+                            best, best_score = tid, s
                     if best is None:
                         best = next_id[pi]
                         next_id[pi] += 1
-                        tracks[pi][best] = {"centroid": cen, "last_frame": f, "frames": 0}
+                        tracks[pi][best] = {"centroid": cen, "last_frame": f, "frames": 0,
+                                            "first_frame": f, "emb": None, "frame_set": set()}
                     tr = tracks[pi][best]
                     tr["centroid"] = 0.7 * tr["centroid"] + 0.3 * cen
+                    if emb is not None:
+                        e = emb if tr["emb"] is None else 0.8 * tr["emb"] + 0.2 * emb
+                        tr["emb"] = e / (np.linalg.norm(e) + 1e-9)
                     tr["last_frame"] = f
                     tr["frames"] += 1
+                    tr["frame_set"].add(f)
                     label_vols[pi][f][m] = best
             if (f + 1) % 40 == 0:
                 counts = {prompts[pi]: len(tracks[pi]) for pi in range(len(prompts))}
@@ -327,6 +396,62 @@ def stage_track(frames):
     del processor, model
     torch.cuda.empty_cache()
     peak = torch.cuda.max_memory_allocated() / 2**30
+
+    # offline consolidation: online re-id reconnects dormant tracks to NEW
+    # detections but never merges two already-grown fragments of the same
+    # object. Merge track pairs with similar appearance and nearby centroids,
+    # UNLESS they were detected in the same frames (>2 co-occurrences means
+    # two real objects were visible simultaneously).
+    if not ARGS.no_reid:
+        for pi, prompt in enumerate(prompts):
+            trs = tracks[pi]
+            parent = {tid: tid for tid in trs}
+
+            def find(a):
+                while parent[a] != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
+
+            root_frames = {tid: set(tr["frame_set"]) for tid, tr in trs.items()}
+            ids = list(trs)
+            pairs = []
+            for i, a in enumerate(ids):
+                for b in ids[i + 1:]:
+                    ta, tb = trs[a], trs[b]
+                    if ta["emb"] is None or tb["emb"] is None:
+                        continue
+                    sim = float(ta["emb"] @ tb["emb"])
+                    if sim < ARGS.reid_sim:
+                        continue
+                    if np.linalg.norm(ta["centroid"] - tb["centroid"]) > eps_far:
+                        continue
+                    pairs.append((sim, a, b))
+            merged = 0
+            for sim, a, b in sorted(pairs, reverse=True):
+                ra, rb = find(a), find(b)
+                if ra == rb or len(root_frames[ra] & root_frames[rb]) > 2:
+                    continue
+                parent[rb] = ra
+                root_frames[ra] |= root_frames[rb]
+                merged += 1
+            if merged:
+                lut = np.arange(next_id[pi], dtype=np.uint16)
+                for tid in ids:
+                    lut[tid] = find(tid)
+                label_vols[pi] = lut[label_vols[pi]]
+                for tid in ids:
+                    r = find(tid)
+                    if r != tid:
+                        tr, dst = trs.pop(tid), trs[r]
+                        n = dst["frames"] + tr["frames"]
+                        dst["centroid"] = (dst["centroid"] * dst["frames"]
+                                           + tr["centroid"] * tr["frames"]) / n
+                        dst["frames"] = n
+                        dst["frame_set"] |= tr["frame_set"]
+                        dst["first_frame"] = min(dst["first_frame"], tr["first_frame"])
+                        dst["last_frame"] = max(dst["last_frame"], tr["last_frame"])
+                print(f"[track] '{prompt}': consolidated {merged} fragment pairs")
 
     tracks_dir = OUT_DIR / "tracks"
     tracks_dir.mkdir(exist_ok=True)
@@ -339,9 +464,17 @@ def stage_track(frames):
         for tid in set(tracks[pi]) - set(stable):
             vol[vol == tid] = 0
         np.savez_compressed(tracks_dir / f"{prompt.replace(' ', '_')}.npz", labels=vol)
-        summary[prompt] = {"objects": len(stable)}
+        spans = [tr["last_frame"] - tr.get("first_frame", tr["last_frame"]) + 1
+                 for tr in stable.values()]
+        summary[prompt] = {
+            "objects": len(stable),
+            "max_detections_per_track": max((tr["frames"] for tr in stable.values()), default=0),
+            "max_track_span_frames": max(spans, default=0),
+            "mean_track_span_frames": round(float(np.mean(spans)), 1) if spans else 0,
+        }
         print(f"[track] '{prompt}': {len(stable)} stable tracks "
-              f"({len(tracks[pi]) - len(stable)} flicker tracks dropped)")
+              f"({len(tracks[pi]) - len(stable)} flicker dropped, "
+              f"longest span {summary[prompt]['max_track_span_frames']} frames)")
     (tracks_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"[track] done in {summary['seconds']}s, peak {peak:.2f} GiB")
 
