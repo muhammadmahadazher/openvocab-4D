@@ -1,0 +1,3 @@
+## 2024-05-18 - Replacing PIL with OpenCV for exact boolean mask resizing
+**Learning:** `PIL.Image.resize(..., Image.NEAREST)` for boolean masks casted to `uint8` * 255 does not yield the exact same output as OpenCV's nearest neighbor unless you specifically use `cv2.resize(..., interpolation=cv2.INTER_NEAREST_EXACT)`. OpenCV's exact interpolation accurately mirrors PIL, but is 2.5x faster. This is vital when refactoring AI inference pipelines that rely on precise pixel matching for masks (like SAM 3 detection).
+**Action:** When porting `PIL.Image.resize` (nearest) to OpenCV, use `cv2.INTER_NEAREST_EXACT` to avoid silent logical regressions in masking operations.
