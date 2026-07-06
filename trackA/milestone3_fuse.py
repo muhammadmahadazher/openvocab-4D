@@ -17,6 +17,7 @@ Outputs:
 """
 
 import argparse
+import cv2
 import json
 import shutil
 import sys
@@ -84,11 +85,9 @@ def resize_mask(mask, dw, dh):
     mh, mw = mask.shape
     scale = dw / mw
     new_h = max(dh, int(round(mh * scale)))
-    img = Image.fromarray(mask.astype(np.uint8) * 255)
-    img = img.resize((dw, new_h), Image.NEAREST)
-    arr = np.array(img) > 127
+    arr = cv2.resize(mask.astype(np.uint8), (dw, new_h), interpolation=cv2.INTER_NEAREST_EXACT)
     top = (new_h - dh) // 2
-    return arr[top:top + dh, :]
+    return arr[top:top + dh, :] > 0
 
 
 def run_sam3(image_paths, prompts, min_score, dw, dh):
